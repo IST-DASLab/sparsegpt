@@ -47,6 +47,10 @@ The BLOOM script `bloom.py` has a very similar interface, however some features 
 python bloom.py bigscience/bloom c4 --sparsity .5
 ```
 
+In case one would like to save the sparsified model specify path to saved checkpoint via  `--save` flag.
+
+One can optionally log evalution results to W&B with `--log_wandb`. 
+
 ## Cite
 
 If you found this work useful, please consider citing:
