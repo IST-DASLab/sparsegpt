@@ -7,6 +7,12 @@ from quant import *
 from sparsegpt import *
 from modelutils import *
 
+try:
+    import wandb
+    has_wandb = True
+except:
+    has_wandb = False 
+
 
 def get_opt(model):
     import torch
@@ -122,7 +128,7 @@ def opt_sequential(model, dataloader, dev):
     model.config.use_cache = use_cache
 
 @torch.no_grad()
-def opt_eval(model, testenc, dev):
+def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
     print('Evaluating ...')
 
     testenc = testenc.input_ids
@@ -218,7 +224,9 @@ def opt_eval(model, testenc, dev):
         neg_log_likelihood = loss.float() * model.seqlen
         nlls.append(neg_log_likelihood)
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
-    print(ppl.item())
+    print(f"Perplexity: {ppl.item():3f}")
+    if log_wandb:
+         wandb.log({f'{dataset}/perplexity': ppl.item()})
 
     model.config.use_cache = use_cache
 
@@ -289,8 +297,21 @@ if __name__ == '__main__':
        '--invert', action='store_true', 
        help='Invert subset.'
     )
+    parser.add_argument(
+       '--save', type=str, default='',
+       help='Path to saved model.'
+    )
+    parser.add_argument(
+       '--log_wandb', action='store_true',
+       help='Whether to log to wandb.'
+    )
 
     args = parser.parse_args()
+
+    # init W&B logging
+    if args.log_wandb:
+        assert has_wandb, "wandb not installed try `pip install wandb`"
+        wandb.init(config=args)
 
     model = get_opt(args.model)
     model.eval()
@@ -313,4 +334,7 @@ if __name__ == '__main__':
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
         )
         print(dataset)
-        opt_eval(model, testloader, DEV)
+        opt_eval(model, testloader, DEV, dataset, args.log_wandb)
+
+    if args.save:
+        model.save_pretrained(args.save)
