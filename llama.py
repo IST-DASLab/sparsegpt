@@ -2,11 +2,11 @@ import time
 
 import torch
 import torch.nn as nn
-from transformers import OPTForCausalLM
+from transformers import LlamaForCausalLM
 
-from quant import *
 from sparsegpt import *
 from modelutils import *
+from quant import *
 
 try:
     import wandb
@@ -15,26 +15,24 @@ except:
     has_wandb = False
 
 
-def get_opt(model):
-    model = OPTForCausalLM.from_pretrained(model, low_cpu_mem_usage=True, torch_dtype="auto")
-    model.seqlen = model.config.max_position_embeddings
+def get_llama(model):
+    model = LlamaForCausalLM.from_pretrained(
+        model, low_cpu_mem_usage=True, torch_dtype="auto"
+    )
+    model.seqlen = 2048
     return model
 
 
 @torch.no_grad()
-def opt_sequential(model, dataloader, dev):
-    print("Starting ...")
+def llama_sequential(model, dataloader, dev):
+    print("Starting...")
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.model.decoder.layers
+    layers = model.model.layers
 
-    model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
-    model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
-    if hasattr(model.model.decoder, "project_out") and model.model.decoder.project_out:
-        model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
-    if hasattr(model.model.decoder, "project_in") and model.model.decoder.project_in:
-        model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
+    model.model.norm = model.model.norm.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -63,12 +61,8 @@ def opt_sequential(model, dataloader, dev):
     layers[0] = layers[0].module
 
     layers[0] = layers[0].cpu()
-    model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.cpu()
-    model.model.decoder.embed_positions = model.model.decoder.embed_positions.cpu()
-    if hasattr(model.model.decoder, "project_out") and model.model.decoder.project_out:
-        model.model.decoder.project_out = model.model.decoder.project_out.cpu()
-    if hasattr(model.model.decoder, "project_in") and model.model.decoder.project_in:
-        model.model.decoder.project_in = model.model.decoder.project_in.cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
+    model.model.norm = model.model.norm.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -76,65 +70,81 @@ def opt_sequential(model, dataloader, dev):
 
     print("Ready.")
 
+    quantizers = {}
     for i in range(len(layers)):
         layer = layers[i].to(dev)
+        full = find_layers(layer)
 
-        subset = find_layers(layer)
+        if args.true_sequential:
+            sequential = [
+                ["self_attn.k_proj", "self_attn.v_proj", "self_attn.q_proj"],
+                ["self_attn.o_proj"],
+                ["mlp.up_proj", "mlp.gate_proj"],
+                ["mlp.down_proj"],
+            ]
+        else:
+            sequential = [list(full.keys())]
 
-        gpts = {}
-        for name in subset:
-            if (
-                not (args.minlayer <= i < args.maxlayer and args.prune_only in name)
-            ) == (not args.invert):
-                continue
-            gpts[name] = SparseGPT(subset[name])
-            if args.wbits < 16:
-                gpts[name].quantizer = Quantizer()
-                gpts[name].quantizer.configure(
-                    args.wbits, perchannel=True, sym=False, mse=False
+        for names in sequential:
+            subset = {n: full[n] for n in names}
+
+            gpts = {}
+            for name in subset:
+                if (
+                    not (args.minlayer <= i < args.maxlayer and args.prune_only in name)
+                ) == (not args.invert):
+                    continue
+                gpts[name] = SparseGPT(subset[name])
+                if args.wbits < 16:
+                    gpts[name].quantizer = Quantizer()
+                    gpts[name].quantizer.configure(
+                        args.wbits, perchannel=True, sym=False, mse=False
+                    )
+
+            def add_batch(name):
+                def tmp(_, inp, out):
+                    gpts[name].add_batch(inp[0].data, out.data)
+
+                return tmp
+
+            handles = []
+            for name in subset:
+                handles.append(subset[name].register_forward_hook(add_batch(name)))
+            for j in range(args.nsamples):
+                outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
+            for h in handles:
+                h.remove()
+
+            for name in subset:
+                print(i, name)
+                print("Pruning ...")
+                sparsity = args.sparsity
+                gpts[name].fasterprune(
+                    sparsity,
+                    prunen=args.prunen,
+                    prunem=args.prunem,
+                    percdamp=args.percdamp,
+                    blocksize=args.blocksize,
                 )
-
-        def add_batch(name):
-            def tmp(_, inp, out):
-                gpts[name].add_batch(inp[0].data, out.data)
-
-            return tmp
-
-        handles = []
-        for name in gpts:
-            handles.append(subset[name].register_forward_hook(add_batch(name)))
-        for j in range(args.nsamples):
-            outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
-        for h in handles:
-            h.remove()
-
-        for name in gpts:
-            print(i, name)
-            print("Pruning ...")
-            sparsity = args.sparsity
-            gpts[name].fasterprune(
-                sparsity,
-                prunen=args.prunen,
-                prunem=args.prunem,
-                percdamp=args.percdamp,
-                blocksize=args.blocksize,
-            )
-            gpts[name].free()
+                gpts[name].free()
 
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask)[0]
 
         layers[i] = layer.cpu()
         del layer
+        del gpts
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
 
     model.config.use_cache = use_cache
 
+    return quantizers
+
 
 @torch.no_grad()
-def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
+def llama_eval(model, testenc, dev,  dataset: str, log_wandb: bool = False):
     print("Evaluating ...")
 
     testenc = testenc.input_ids
@@ -142,14 +152,9 @@ def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
 
     use_cache = model.config.use_cache
     model.config.use_cache = False
-    layers = model.model.decoder.layers
+    layers = model.model.layers
 
-    model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev)
-    model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
-    if hasattr(model.model.decoder, "project_out") and model.model.decoder.project_out:
-        model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
-    if hasattr(model.model.decoder, "project_in") and model.model.decoder.project_in:
-        model.model.decoder.project_in = model.model.decoder.project_in.to(dev)
+    model.model.embed_tokens = model.model.embed_tokens.to(dev)
     layers[0] = layers[0].to(dev)
 
     dtype = next(iter(model.parameters())).dtype
@@ -179,12 +184,7 @@ def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
     layers[0] = layers[0].module
 
     layers[0] = layers[0].cpu()
-    model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.cpu()
-    model.model.decoder.embed_positions = model.model.decoder.embed_positions.cpu()
-    if hasattr(model.model.decoder, "project_out") and model.model.decoder.project_out:
-        model.model.decoder.project_out = model.model.decoder.project_out.cpu()
-    if hasattr(model.model.decoder, "project_in") and model.model.decoder.project_in:
-        model.model.decoder.project_in = model.model.decoder.project_in.cpu()
+    model.model.embed_tokens = model.model.embed_tokens.cpu()
     torch.cuda.empty_cache()
 
     outs = torch.zeros_like(inps)
@@ -210,22 +210,16 @@ def opt_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
         torch.cuda.empty_cache()
         inps, outs = outs, inps
 
-    if model.model.decoder.final_layer_norm is not None:
-        model.model.decoder.final_layer_norm = model.model.decoder.final_layer_norm.to(
-            dev
-        )
-    if model.model.decoder.project_out is not None:
-        model.model.decoder.project_out = model.model.decoder.project_out.to(dev)
+    if model.model.norm is not None:
+        model.model.norm = model.model.norm.to(dev)
     model.lm_head = model.lm_head.to(dev)
 
     testenc = testenc.to(dev)
     nlls = []
     for i in range(nsamples):
         hidden_states = inps[i].unsqueeze(0)
-        if model.model.decoder.final_layer_norm is not None:
-            hidden_states = model.model.decoder.final_layer_norm(hidden_states)
-        if model.model.decoder.project_out is not None:
-            hidden_states = model.model.decoder.project_out(hidden_states)
+        if model.model.norm is not None:
+            hidden_states = model.model.norm(hidden_states)
         lm_logits = model.lm_head(hidden_states)
         shift_logits = lm_logits[:, :-1, :].contiguous()
         shift_labels = testenc[:, (i * model.seqlen) : ((i + 1) * model.seqlen)][:, 1:]
@@ -249,9 +243,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument(
-        "model", type=str, help="OPT model to load; pass `facebook/opt-X`."
-    )
+    parser.add_argument("model", type=str, help="LlaMA model to load")
     parser.add_argument(
         "dataset",
         type=str,
@@ -300,17 +292,17 @@ if __name__ == "__main__":
     parser.add_argument("--invert", action="store_true", help="Invert subset.")
     parser.add_argument("--save", type=str, default="", help="Path to saved model.")
     parser.add_argument(
+        "--true-sequential",
+        action="store_true",
+        help="Whether to run in true sequential model.",
+    )
+    parser.add_argument(
         "--log_wandb", action="store_true", help="Whether to log to wandb."
     )
 
     args = parser.parse_args()
 
-    # init W&B logging
-    if args.log_wandb:
-        assert has_wandb, "wandb not installed try `pip install wandb`"
-        wandb.init(config=args)
-
-    model = get_opt(args.model)
+    model = get_llama(args.model)
     model.eval()
 
     dataloader, testloader = get_loaders(
@@ -323,19 +315,15 @@ if __name__ == "__main__":
 
     if (args.sparsity or args.prunen) and not args.gmp:
         tick = time.time()
-        opt_sequential(model, dataloader, DEV)
-        for n, p in model.named_parameters():
-            print(n, torch.mean((p == 0).float()))
-            if "fc2" in n:
-                break
+        llama_sequential(model, dataloader, DEV)
         print(time.time() - tick)
 
     for dataset in ["wikitext2", "ptb", "c4"]:
         dataloader, testloader = get_loaders(
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
         )
-        print(dataset)
-        opt_eval(model, testloader, DEV, dataset, args.log_wandb)
+        print("Dataset:", dataset)
+        llama_eval(model, testloader, DEV, dataset, args.log_wandb)
 
     if args.save:
         model.save_pretrained(args.save)

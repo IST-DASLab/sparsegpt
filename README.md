@@ -47,9 +47,19 @@ The BLOOM script `bloom.py` has a very similar interface, however some features 
 python bloom.py bigscience/bloom c4 --sparsity .5
 ```
 
+We also provide LLaMA pruning script with the very same interface:
+```
+# Sparsify BLOOM-65B with SparseGPT
+python llama.py huggyllama/llama-65b c4 --sparsity 0.5
+```
+
 In case one would like to save the sparsified model specify path to saved checkpoint via  `--save` flag.
 
 One can optionally log evalution results to W&B with `--log_wandb`. 
+
+## Demo
+
+One can try SparseGPT via the colab demo - `demo.ipynb`. 
 
 ## Cite
 
