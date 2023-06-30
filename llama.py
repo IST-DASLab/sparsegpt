@@ -2,7 +2,6 @@ import time
 
 import torch
 import torch.nn as nn
-from transformers import LlamaForCausalLM
 
 from sparsegpt import *
 from modelutils import *
@@ -16,9 +15,14 @@ except:
 
 
 def get_llama(model):
-    model = LlamaForCausalLM.from_pretrained(
-        model, low_cpu_mem_usage=True, torch_dtype="auto"
-    )
+    import torch
+    def skip(*args, **kwargs):
+        pass
+    torch.nn.init.kaiming_uniform_ = skip
+    torch.nn.init.uniform_ = skip
+    torch.nn.init.normal_ = skip
+    from transformers import LlamaForCausalLM
+    model = LlamaForCausalLM.from_pretrained(model, torch_dtype='auto')
     model.seqlen = 2048
     return model
 
@@ -302,20 +306,25 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # init W&B logging
+    if args.log_wandb:
+        assert has_wandb, "wandb not installed try `pip install wandb`"
+        wandb.init(config=args)
+
     model = get_llama(args.model)
     model.eval()
 
     dataloader, testloader = get_loaders(
-        args.dataset,
-        nsamples=args.nsamples,
-        seed=args.seed,
-        model=args.model,
-        seqlen=model.seqlen,
+        args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
     )
 
     if (args.sparsity or args.prunen) and not args.gmp:
         tick = time.time()
         llama_sequential(model, dataloader, DEV)
+        for n, p in model.named_parameters():
+            print(n, torch.mean((p == 0).float()))
+            if 'down_proj' in n:
+                break
         print(time.time() - tick)
 
     for dataset in ["wikitext2", "ptb", "c4"]:
