@@ -48,9 +48,10 @@ python bloom.py bigscience/bloom c4 --sparsity .5
 ```
 
 We also provide LLaMA pruning script with the very same interface:
+
 ```
-# Sparsify BLOOM-65B with SparseGPT
-python llama.py huggyllama/llama-65b c4 --sparsity 0.5
+# Sparsify LLaMa with SparseGPT
+python llama.py LLAMA_HF_WEIGHTS_LOCATION c4 --sparsity 0.5
 ```
 
 In case one would like to save the sparsified model specify path to saved checkpoint via  `--save` flag.
