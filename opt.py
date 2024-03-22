@@ -329,7 +329,7 @@ if __name__ == '__main__':
                 break
         print(time.time() - tick)
 
-    for dataset in ['ptb', 'c4']:
+    for dataset in ['c4']:
         dataloader, testloader = get_loaders(
             dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
         )
