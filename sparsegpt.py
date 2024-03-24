@@ -20,6 +20,10 @@ class SparseGPT:
         self.layer = layer
         self.dev = self.layer.weight.device
         W = layer.weight.data.clone()
+
+        print("layer type: ", type(layer))
+        print(layer)
+
         if isinstance(self.layer, nn.Conv2d):
             W = W.flatten(1)
         if isinstance(self.layer, transformers.Conv1D):
