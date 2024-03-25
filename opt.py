@@ -33,7 +33,7 @@ def opt_sequential(model, dataloader, dev):
     use_cache = model.config.use_cache
     model.config.use_cache = False
     layers = model.model.decoder.layers
-
+    print(layers)
     model.model.decoder.embed_tokens = model.model.decoder.embed_tokens.to(dev) 
     model.model.decoder.embed_positions = model.model.decoder.embed_positions.to(dev)
     if hasattr(model.model.decoder, 'project_out') and model.model.decoder.project_out:
