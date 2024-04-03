@@ -99,6 +99,7 @@ def opt_sequential(model, dataloader, dev):
         def add_batch(name):
             def tmp(_, inp, out):
                 gpts[name].add_batch(inp[0].data, out.data)
+                print(gpts[name])
             return tmp
         handles = []
         for name in gpts:
