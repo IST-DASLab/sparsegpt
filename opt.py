@@ -46,6 +46,7 @@ def opt_sequential(model, dataloader, dev):
     inps = torch.zeros(
         (args.nsamples, model.seqlen, model.config.hidden_size), dtype=dtype, device=dev
     )
+    print(inps.shape)
     cache = {'i': 0, 'attention_mask': None}
 
     class Catcher(nn.Module):
