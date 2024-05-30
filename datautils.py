@@ -12,7 +12,7 @@ def set_seed(seed):
 
 def get_tokenizer(model):
     if "llama" in model.lower():
-        tokenizer = LlamaTokenizer.from_pretrained(model, use_fast=False)
+        tokenizer = LlamaTokenizer.from_pretrained(model, use_fast=False, trust_remote_code=True)
         # fix for transformer 4.28.0.dev0 compatibility
         if tokenizer.bos_token_id != 1 or tokenizer.eos_token_id != 2:
             try:
@@ -21,7 +21,7 @@ def get_tokenizer(model):
             except AttributeError:
                 pass
     else:
-        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False)
+        tokenizer = AutoTokenizer.from_pretrained(model, use_fast=False, trust_remote_code=True)
     return tokenizer
 
 def get_wikitext2(nsamples, seed, seqlen, model, tokenizer):

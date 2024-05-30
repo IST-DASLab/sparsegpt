@@ -23,7 +23,7 @@ def get_bloom(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     from transformers import BloomForCausalLM
-    model = BloomForCausalLM.from_pretrained(model, torch_dtype='auto')
+    model = BloomForCausalLM.from_pretrained(model, torch_dtype='auto', trust_remote_code=True)
     model.seqlen = 2048
     return model
 
