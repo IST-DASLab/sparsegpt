@@ -22,7 +22,7 @@ def get_opt(model):
     torch.nn.init.uniform_ = skip
     torch.nn.init.normal_ = skip
     from transformers import OPTForCausalLM
-    model = OPTForCausalLM.from_pretrained(model, torch_dtype='auto')
+    model = OPTForCausalLM.from_pretrained(model, torch_dtype='auto', trust_remote_code=True)
     model.seqlen = model.config.max_position_embeddings
     return model
 
