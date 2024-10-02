@@ -1,19 +1,19 @@
 import math
 import time
+import csv
 
 import torch
 import torch.nn as nn
 import transformers
 
-from sparsegpt import * 
+from sparsegpt import *
 from modelutils import *
 
 try:
     import wandb
     has_wandb = True
 except:
-    has_wandb = False    
-
+    has_wandb = False
 
 def get_bloom(model):
     import torch
@@ -26,6 +26,13 @@ def get_bloom(model):
     model = BloomForCausalLM.from_pretrained(model, torch_dtype='auto')
     model.seqlen = 2048
     return model
+
+# Open CSV file to store data
+csv_file = open('output_data.csv', mode='w', newline='')
+csv_writer = csv.writer(csv_file)
+
+# Write the header for the CSV
+csv_writer.writerow(['Layer', 'Parameter Name', 'Pruned Fraction', 'Perplexity', 'Dataset'])
 
 @torch.no_grad()
 def bloom_sequential(model, dataloader, dev, means=None, stds=None):
@@ -46,8 +53,8 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
     cache = {'i': 0, 'attention_mask': None, 'alibi': None}
 
     class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
+        def _init_(self, module):
+            super()._init_()
             self.module = module
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
@@ -102,6 +109,9 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
             gpts[name].fasterprune(
                 args.sparsity, prunen=args.prunen, prunem=args.prunem, percdamp=args.percdamp
             )
+            # Write layer number and name to CSV
+            csv_writer.writerow([i, name, '', '', ''])
+
         for j in range(args.nsamples):
             outs[j] = layer(inps[j].unsqueeze(0), attention_mask=attention_mask, alibi=alibi)[0]
 
@@ -110,6 +120,14 @@ def bloom_sequential(model, dataloader, dev, means=None, stds=None):
         torch.cuda.empty_cache()
 
         inps, outs = outs, inps
+
+    for n, p in model.named_parameters():
+        pruned_fraction = torch.mean((p == 0).float()).item()
+        print(n, pruned_fraction)
+        # Write pruned fraction to CSV
+        csv_writer.writerow(['', n, pruned_fraction, '', ''])
+        if 'dense_4h_to_h' in n:
+            break
 
     model.config.use_cache = use_cache
 
@@ -135,8 +153,8 @@ def bloom_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
     cache = {'i': 0, 'attention_mask': None, 'alibi': None}
 
     class Catcher(nn.Module):
-        def __init__(self, module):
-            super().__init__()
+        def _init_(self, module):
+            super()._init_()
             self.module = module
         def forward(self, inp, **kwargs):
             inps[cache['i']] = inp
@@ -199,13 +217,16 @@ def bloom_eval(model, testenc, dev, dataset: str, log_wandb: bool = False):
         nlls.append(neg_log_likelihood)
     ppl = torch.exp(torch.stack(nlls).sum() / (nsamples * model.seqlen))
     print(f"Perplexity: {ppl.item():3f}")
+    # Write perplexity and dataset to CSV
+    csv_writer.writerow(['', '', '', ppl.item(), dataset])
+
     if log_wandb:
          wandb.log({f'{dataset}/perplexity': ppl.item()})
 
     model.config.use_cache = use_cache
 
 
-if __name__ == '__main__':
+if _name_ == '_main_':
     import argparse
     from datautils import *
 
@@ -213,7 +234,7 @@ if __name__ == '__main__':
 
     parser.add_argument(
         'model', type=str,
-        help='BLOOM model to load; pass `bigscience/bloom-X`.'
+        help='BLOOM model to load; pass bigscience/bloom-X.'
     )
     parser.add_argument(
         'dataset', type=str, choices=['wikitext2', 'ptb', 'c4'],
@@ -228,12 +249,8 @@ if __name__ == '__main__':
         help='Number of calibration data samples.'
     )
     parser.add_argument(
-        '--percdamp', type=float, default=.01,
-        help='Percent of the average Hessian diagonal to use for dampening.'
-    )
-    parser.add_argument(
         '--sparsity', type=float, default=0,
-        help='Target sparsity'
+        help='Target sparsity.'
     )
     parser.add_argument(
         '--prunen', type=int, default=0,
@@ -245,7 +262,7 @@ if __name__ == '__main__':
     )
     parser.add_argument(
         '--gmp', action='store_true',
-        help='Whether to run the GMP baseline.'
+        help='Whether to run GMP (Global Magnitude Pruning) instead of SparseGPT.'
     )
     parser.add_argument(
         '--minlayer', type=int, default=-1,
@@ -260,47 +277,50 @@ if __name__ == '__main__':
         help='Prune only layers that contain this text.'
     )
     parser.add_argument(
-       '--invert', action='store_true',
-       help='Invert subset.'
+        '--invert', action='store_true',
+        help='Invert subset.'
     )
     parser.add_argument(
-       '--save', type=str, default='',
-       help='Path to saved model.'
+        '--percdamp', type=float, default=0.01,
+        help='Percent of the average Hessian diagonal to use for dampening.'
     )
     parser.add_argument(
-       '--log_wandb', action='store_true',
-       help='Whether to log to wandb.'
+        '--blocksize', type=int, default=128,
+        help='Size of the blocks for adaptive mask selection.'
+    )
+    parser.add_argument(
+        '--scaled', action='store_true',
+        help='Whether to use the scaled Hessian for dampening.'
+    )
+    parser.add_argument(
+        '--save', type=str, default='',
+        help='Path to save the model to.'
+    )
+    parser.add_argument(
+        '--log_wandb', action='store_true',
+        help='Whether to log results to Weights & Biases.'
     )
 
     args = parser.parse_args()
 
-    # init W&B logging
-    if args.log_wandb:
-        assert has_wandb, "wandb not installed try `pip install wandb`"
-        wandb.init(config=args)
+    DEV = torch.device('cuda:0')
 
     model = get_bloom(args.model)
-    model.eval()
+    model = model.to(DEV)
 
-    dataloader, testloader = get_loaders(
-        args.dataset, nsamples=args.nsamples, seed=args.seed, model=args.model, seqlen=model.seqlen
-    )
+    dataloader, testloader = get_loaders(args.dataset, nsamples=args.nsamples, seed=args.seed, model=model)
 
     if (args.sparsity or args.prunen) and not args.gmp:
         tick = time.time()
         bloom_sequential(model, dataloader, DEV)
-        for n, p in model.named_parameters():
-            print(n, torch.mean((p == 0).float()))
-            if 'dense_4h_to_h' in n:
-                break
         print(time.time() - tick)
 
     for dataset in ['wikitext2', 'ptb', 'c4']:
-        dataloader, testloader = get_loaders(
-            dataset, seed=args.seed, model=args.model, seqlen=model.seqlen
-        )
         print("Dataset:", dataset)
         bloom_eval(model, testloader, DEV, dataset, args.log_wandb)
-    
+
     if args.save:
         model.save_pretrained(args.save)
+
+    # Close the CSV file after everything is done
+    csv_file.close()
